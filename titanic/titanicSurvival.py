@@ -30,9 +30,9 @@ import warnings
 
 #%% For Testing
 
-inputTrain = r'C:\Users\hungd\Desktop\python_Practice\titanic\input\train.csv'
-inputTestX = r'C:\Users\hungd\Desktop\python_Practice\titanic\input\test.csv'
-inputTesty = r'C:\Users\hungd\Desktop\python_Practice\titanic\input\gender_submission.csv'
+inputTrain = r'.\input\train.csv'
+inputTestX = r'.\input\test.csv'
+inputTesty = r'.\input\gender_submission.csv'
 
 # Define global variables
 SEED = 42
@@ -45,6 +45,16 @@ warnings.filterwarnings('ignore')
 #%% Seaborn Settings
 
 sns.set(style="darkgrid")
+
+#%% Divide df
+
+def concat_df(train_data, test_data):
+    # Returns a concatenated df of training and test set
+    return pd.concat([train_data, test_data], sort=True).reset_index(drop=True)
+
+def divide_df(df):
+    # Returns divided dfs of training and test set
+    return df.loc[:890], df.loc[891:]
 
 #%% Import Data
 
@@ -117,7 +127,241 @@ def imputeDeck(df):
     # Drop Cabin and use deck instead
     df = df.drop('Cabin', 1)
     return df
+
+#%% Bin Fare
+
+def binFare(df):
+    df['Fare'] = pd.qcut(df['Fare'], 13)
+    return df
+
+#%% Bin Age
+
+def binAge(df):
+    df['Age'] = pd.qcut(df['Age'], 10)
+    return df
+
+#%% Bin Family Size
+
+def binFamilySize(df):
+    # Siblings + Spouse + Parents + self
+    df['Family_Size'] = df['SibSp'] + df['Parch'] + 1
     
+    # Map Family size to categorical
+    family_map = {1: 'Alone', 2: 'Small', 3: 'Small', 4: 'Small', 5: 'Medium', 6: 'Medium', 7: 'Large', 8: 'Large', 11: 'Large'}
+    df['Family_Size_Grouped'] = df['Family_Size'].map(family_map)
+    return df
+
+#%% Bin Ticket Frequency
+
+def binTicketFrequency(df):
+    df['Ticket_Frequency'] = df.groupby('Ticket')['Ticket'].transform('count')
+    return df
+
+#%% Bin Titles
+
+def binTitles(df):
+    df['Title'] = df['Name'].str.split(', ', expand=True)[1].str.split('.', expand=True)[0]
+    df['Is_Married'] = 0
+    df['Is_Married'].loc[df['Title'] == 'Mrs'] = 1
+    
+    df['Title'] = df['Title'].replace(['Miss', 'Mrs','Ms', 'Mlle', 'Lady', 'Mme', 'the Countess', 'Dona'], 'Miss/Mrs/Ms')
+    df['Title'] = df['Title'].replace(['Dr', 'Col', 'Major', 'Jonkheer', 'Capt', 'Sir', 'Don', 'Rev'], 'Dr/Military/Noble/Clergy')
+    return df
+ 
+#%% Bin Family Survival Rate
+
+def binFamilySurvivalRate(df):
+    # Create family surname from name
+    df['Family'] = extract_surname(df['Name'])
+    
+    # Split df into train and test
+    df_train, df_test = divide_df(df)
+    
+    # Calculate Family Survival Rate in training data
+    family_rates = calcFamSurvivalRate(df_train, df_test)
+    
+    # Add Family Survival Rates to training and test data
+    df_train, df_test = addFamSurvivalRates(df_train, df_test, family_rates)
+    return df_train, df_test
+
+# Extract Surname
+def extract_surname(data):       
+    families = []   
+    for i in range(len(data)):        
+        name = data.iloc[i]
+        if '(' in name:
+            name_no_bracket = name.split('(')[0] 
+        else:
+            name_no_bracket = name            
+        family = name_no_bracket.split(',')[0]       
+        for c in string.punctuation:
+            family = family.replace(c, '').strip()           
+        families.append(family)           
+    return families
+
+# Calculate Family Survival Rate in training data
+def calcFamSurvivalRate(df_train, df_test):
+    # Creating a list of families and tickets that are occuring in both training and test set
+    non_unique_families = [x for x in df_train['Family'].unique() if x in df_test['Family'].unique()]
+    df_family_survival_rate = df_train.groupby('Family')['Survived', 'Family','Family_Size'].median()
+
+#%% Evaulaute Model
+    family_rates = {}
+    for i in range(len(df_family_survival_rate)):
+        # Checking a family exists in both training and test set, and has members more than 1
+        if df_family_survival_rate.index[i] in non_unique_families and df_family_survival_rate.iloc[i, 1] > 1:
+            family_rates[df_family_survival_rate.index[i]] = df_family_survival_rate.iloc[i, 0]
+    return family_rates
+
+# Add Family Survival Rates to training and test data
+def addFamSurvivalRates(df_train, df_test, family_rates):
+    mean_survival_rate = np.mean(df_train['Survived'])
+
+    train_family_survival_rate = []
+    train_family_survival_rate_NA = []
+    test_family_survival_rate = []
+    test_family_survival_rate_NA = []
+    
+    for i in range(len(df_train)):
+        if df_train['Family'][i] in family_rates:
+            train_family_survival_rate.append(family_rates[df_train['Family'][i]])
+            train_family_survival_rate_NA.append(1)
+        else:
+            train_family_survival_rate.append(mean_survival_rate)
+            train_family_survival_rate_NA.append(0)
+            
+    for i in range(len(df_test)):
+        if df_test['Family'].iloc[i] in family_rates:
+            test_family_survival_rate.append(family_rates[df_test['Family'].iloc[i]])
+            test_family_survival_rate_NA.append(1)
+        else:
+            test_family_survival_rate.append(mean_survival_rate)
+            test_family_survival_rate_NA.append(0)
+            
+    df_train['Family_Survival_Rate'] = train_family_survival_rate
+    df_train['Family_Survival_Rate_NA'] = train_family_survival_rate_NA
+    df_test['Family_Survival_Rate'] = test_family_survival_rate
+    df_test['Family_Survival_Rate_NA'] = test_family_survival_rate_NA
+    return df_train, df_test
+
+#%% Bin ticket Survival Rate
+
+def binTicketSurvivalRate(df_train, df_test):
+    # Calculate Ticket Survival Rate in training data
+    ticket_rates = calcTicketSurvivalRates(df_train, df_test)
+    
+    # Add Ticket Survival Rates to training and test data
+    df_train, df_test = addTicketSurvivalRates(df_train, df_test, ticket_rates)
+    return df_train, df_test
+
+# Calculate Ticket Survival Rate in training data
+def calcTicketSurvivalRates(df_train, df_test):
+    non_unique_tickets = [x for x in df_train['Ticket'].unique() if x in df_test['Ticket'].unique()]
+    df_ticket_survival_rate = df_train.groupby('Ticket')['Survived', 'Ticket','Ticket_Frequency'].median()
+    
+    ticket_rates = {}
+    for i in range(len(df_ticket_survival_rate)):
+        # Checking a ticket exists in both training and test set, and has members more than 1
+        if df_ticket_survival_rate.index[i] in non_unique_tickets and df_ticket_survival_rate.iloc[i, 1] > 1:
+            ticket_rates[df_ticket_survival_rate.index[i]] = df_ticket_survival_rate.iloc[i, 0]
+    return ticket_rates
+
+# Add Ticket Survival Rates to training and test data
+def addTicketSurvivalRates(df_train, df_test, ticket_rates):
+    mean_survival_rate = np.mean(df_train['Survived'])
+    
+    train_ticket_survival_rate = []
+    train_ticket_survival_rate_NA = []
+    test_ticket_survival_rate = []
+    test_ticket_survival_rate_NA = []
+    
+    for i in range(len(df_train)):
+        if df_train['Ticket'][i] in ticket_rates:
+            train_ticket_survival_rate.append(ticket_rates[df_train['Ticket'][i]])
+            train_ticket_survival_rate_NA.append(1)
+        else:
+            train_ticket_survival_rate.append(mean_survival_rate)
+            train_ticket_survival_rate_NA.append(0)
+            
+    for i in range(len(df_test)):
+        if df_test['Ticket'].iloc[i] in ticket_rates:
+            test_ticket_survival_rate.append(ticket_rates[df_test['Ticket'].iloc[i]])
+            test_ticket_survival_rate_NA.append(1)
+        else:
+            test_ticket_survival_rate.append(mean_survival_rate)
+            test_ticket_survival_rate_NA.append(0)
+            
+    df_train['Ticket_Survival_Rate'] = train_ticket_survival_rate
+    df_train['Ticket_Survival_Rate_NA'] = train_ticket_survival_rate_NA
+    df_test['Ticket_Survival_Rate'] = test_ticket_survival_rate
+    df_test['Ticket_Survival_Rate_NA'] = test_ticket_survival_rate_NA
+    return df_train, df_test
+
+#%% Calculate overall survival rate
+
+def calcOverallSurvival(df_train, df_test):
+    for df in [df_train, df_test]:
+        df['Survival_Rate'] = (df['Ticket_Survival_Rate'] + df['Family_Survival_Rate']) / 2
+        df['Survival_Rate_NA'] = (df['Ticket_Survival_Rate_NA'] + df['Family_Survival_Rate_NA']) / 2
+    return df_train, df_test
+
+#%% Label Encoding
+
+def labelEncoding(df_train, df_test):
+    non_numeric_features = ['Embarked', 'Sex', 'Deck', 'Title', 'Family_Size_Grouped', 'Age', 'Fare']
+
+    for df in [df_train, df_test]:
+        for feature in non_numeric_features:        
+            df[feature] = LabelEncoder().fit_transform(df[feature])
+    return df_train, df_test
+
+#%% One hot Encoding
+
+def oneHotEncoding(df_train, df_test):
+    cat_features = ['Pclass', 'Sex', 'Deck', 'Embarked', 'Title', 'Family_Size_Grouped']
+    encoded_features = []
+    
+    for df in [df_train, df_test]:
+        for feature in cat_features:
+            encoded_feat = OneHotEncoder().fit_transform(df[feature].values.reshape(-1, 1)).toarray()
+            n = df[feature].nunique()
+            cols = ['{}_{}'.format(feature, n) for n in range(1, n + 1)]
+            encoded_df = pd.DataFrame(encoded_feat, columns=cols)
+            encoded_df.index = df.index
+            encoded_features.append(encoded_df)
+    
+    df_train = pd.concat([df_train, *encoded_features[:6]], axis=1)
+    df_test = pd.concat([df_test, *encoded_features[6:]], axis=1)
+    return df_train, df_test
+
+#%% Drop useless columns
+
+def dropUselessColumns(df_train, df_test):
+    keep_cols = ['Age',	'Fare', 'Is_Married', 'Ticket_Frequency',
+                 'Deck_1', 'Deck_2', 'Deck_3', 'Deck_4',
+                 'Embarked_1', 'Embarked_2','Embarked_3',
+                 'Family_Size_Grouped_1', 'Family_Size_Grouped_2', 'Family_Size_Grouped_3', 'Family_Size_Grouped_4', 
+                 'Pclass_1', 'Pclass_2', 'Pclass_3',
+                 'Sex_1', 'Sex_2',
+                 'Survival_Rate', 'Survival_Rate_NA',  
+                 'Title_1',	'Title_2', 'Title_3', 'Title_4',
+                 'Survived']
+    df_train = df_train[keep_cols]
+    df_test = df_test[keep_cols]
+    return df_train, df_test
+
+#%% Use a standard scalar to scale variables
+
+def useStandardScalar(df_train, df_test):
+    # Train
+    X_train = StandardScaler().fit_transform(df_train.drop(columns='Survived'))
+    y_train = df_train['Survived'].values
+    
+    # Test
+    X_test = StandardScaler().fit_transform(df_test.drop(columns='Survived'))
+    y_test = df_test['Survived'].values
+    return X_train, y_train, X_test, y_test
+
 #%% Create model
 
 def createModel(SEED):
@@ -133,20 +377,14 @@ def createModel(SEED):
                                    verbose=1)
     return model
 
-#%% Divide df
-
-def divide_df(df):
-    # Returns divided dfs of training and test set
-    return df.loc[:890], df.loc[891:].drop(['Survived'], axis=1)
-
-#%% Evaulaute Model
+#%% Evaluate Model
 
 def evaluateModel(model, X_train, y_train, X_test, y_test, N):
     # Out of bag score to predict accuracy of testing set
     oob = 0
     
     # Give probability of survival
-    probs = pd.DataFrame(np.zeros((len(X_test), N * 2)), 
+    df_pred = pd.DataFrame(np.zeros((len(X_test), N * 2)), 
                          columns=['Fold_{}_Prob_{}'.format(i, j) for i in range(1, N + 1) for j in range(2)])
     
     # Empty array to keep track of scores
@@ -173,13 +411,14 @@ def evaluateModel(model, X_train, y_train, X_test, y_test, N):
         tprs.append(val_tpr)
         
         # X_test probabilities
-        probs.loc[:, 'Fold_{}_Prob_0'.format(fold)] = model.predict_proba(X_test)[:, 0]
-        probs.loc[:, 'Fold_{}_Prob_1'.format(fold)] = model.predict_proba(X_test)[:, 1]
+        df_pred.loc[:, 'Fold_{}_Prob_0'.format(fold)] = model.predict_proba(X_test)[:, 0]
+        df_pred.loc[:, 'Fold_{}_Prob_1'.format(fold)] = model.predict_proba(X_test)[:, 1]
             
         oob += model.oob_score_ / N
         print('Fold {} OOB Score: {}\n'.format(fold, model.oob_score_))   
         
     print('Average OOB Score: {}'.format(oob))
+    return df_pred
     
 #%% Main
 
@@ -202,14 +441,47 @@ if __name__ == '__main__':
     # Impute Deck
     df = imputeDeck(df)
     
-    # Split df into train and test
-    df_train, df_test = divide_df(df)
+    # Bin Fare
+    df = binFare(df)
+    
+    # Bin Age
+    df = binAge(df)
+    
+    # Bin Family Size
+    df = binFamilySize(df)
+    
+    # Bin Ticket Frequency
+    df = binTicketFrequency(df)
+    
+    # Bin Titles
+    df = binTitles(df) 
+    
+    # Bin Family Survival Rate
+    df_train, df_test = binFamilySurvivalRate(df)
+    
+    # Bin Ticket Survival Rate
+    df_train, df_test = binTicketSurvivalRate(df_train, df_test)
+
+    # Calculate overall survival rate
+    df_train, df_test = calcOverallSurvival(df_train, df_test)
+    
+    # Label Encoding for non-numeric features
+    df_train, df_test = labelEncoding(df_train, df_test)
+    
+    # One hot encode categorical features
+    df_train, df_test = oneHotEncoding(df_train, df_test)
+    
+    # Drop useless columns
+    df_train, df_test = dropUselessColumns(df_train, df_test)
+    
+    # Use standard scalar
+    X_train, y_train, X_test, y_test = useStandardScalar(df_train, df_test)
     
     # Create Model
     model = createModel(SEED)
     
     # Evaluate Baseline Model
-    #evaluateModel(model, X_train, y_train, X_test, y_test, N)
+    oob = evaluateModel(model, X_train, y_train, X_test, y_test, N)
     
 
 
