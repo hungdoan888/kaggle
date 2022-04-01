@@ -147,7 +147,8 @@ def binFamilySize(df):
     df['Family_Size'] = df['SibSp'] + df['Parch'] + 1
     
     # Map Family size to categorical
-    family_map = {1: 'Alone', 2: 'Small', 3: 'Small', 4: 'Small', 5: 'Medium', 6: 'Medium', 7: 'Large', 8: 'Large', 11: 'Large'}
+    family_map = {1: 'Alone', 2: 'Small', 3: 'Small', 4: 'Small', 5: 'Medium', 6: 'Medium', 7: 'Large', 8: 'Large', 
+                  11: 'Large'}
     df['Family_Size_Grouped'] = df['Family_Size'].map(family_map)
     return df
 
@@ -164,8 +165,10 @@ def binTitles(df):
     df['Is_Married'] = 0
     df['Is_Married'].loc[df['Title'] == 'Mrs'] = 1
     
-    df['Title'] = df['Title'].replace(['Miss', 'Mrs','Ms', 'Mlle', 'Lady', 'Mme', 'the Countess', 'Dona'], 'Miss/Mrs/Ms')
-    df['Title'] = df['Title'].replace(['Dr', 'Col', 'Major', 'Jonkheer', 'Capt', 'Sir', 'Don', 'Rev'], 'Dr/Military/Noble/Clergy')
+    df['Title'] = df['Title'].replace(['Miss', 'Mrs','Ms', 'Mlle', 'Lady', 'Mme', 'the Countess', 'Dona'], 
+                                      'Miss/Mrs/Ms')
+    df['Title'] = df['Title'].replace(['Dr', 'Col', 'Major', 'Jonkheer', 'Capt', 'Sir', 'Don', 'Rev'], 
+                                      'Dr/Military/Noble/Clergy')
     return df
  
 #%% Bin Family Survival Rate
@@ -379,47 +382,179 @@ def createModel(SEED):
 
 #%% Evaluate Model
 
-def evaluateModel(model, X_train, y_train, X_test, y_test, N):
+def evaluateModel(model, df_train, X_train, y_train, X_test, N):
     # Out of bag score to predict accuracy of testing set
     oob = 0
     
     # Give probability of survival
     df_pred = pd.DataFrame(np.zeros((len(X_test), N * 2)), 
-                         columns=['Fold_{}_Prob_{}'.format(i, j) for i in range(1, N + 1) for j in range(2)])
+                           columns=['Fold_{}_Prob_{}'.format(i, j) for i in range(1, N + 1) for j in range(2)])
     
-    # Empty array to keep track of scores
-    fprs, tprs, scores = [], [], []
+    # Dataframe to keep track of fprs, tprs, trnAucScore, and valAucScore
+    df_roc = pd.DataFrame()
+    
+    # Feature Importance
+    columns = list(df_train.columns)
+    columns.remove('Survived')
+    df_featImp = pd.DataFrame(np.zeros((X_train.shape[1], N)), 
+                              columns=['Fold_{}'.format(i) for i in range(1, N + 1)], 
+                              index=columns)
     
     # Stratified crossfold validaiton
     skf = StratifiedKFold(n_splits=N, random_state=N, shuffle=True)
-    for fold, (trn_idx, val_idx) in enumerate(skf.split(X_train, y_train), 1):
+    for fold, (trnIdx, valIdx) in enumerate(skf.split(X_train, y_train), 1):
         print('Fold {}\n'.format(fold))
         
         # Fitting the model
-        model.fit(X_train[trn_idx], y_train[trn_idx])
+        model.fit(X_train[trnIdx], y_train[trnIdx])
         
-        # Computing Train AUC score
-        trn_fpr, trn_tpr, trn_thresholds = roc_curve(y_train[trn_idx], model.predict_proba(X_train[trn_idx])[:, 1])
-        trn_auc_score = auc(trn_fpr, trn_tpr)
-        
-        # Computing Validation AUC score
-        val_fpr, val_tpr, val_thresholds = roc_curve(y_train[val_idx], model.predict_proba(X_train[val_idx])[:, 1])
-        val_auc_score = auc(val_fpr, val_tpr)  
-          
-        scores.append((trn_auc_score, val_auc_score))
-        fprs.append(val_fpr)
-        tprs.append(val_tpr)
-        
-        # X_test probabilities
-        df_pred.loc[:, 'Fold_{}_Prob_0'.format(fold)] = model.predict_proba(X_test)[:, 0]
-        df_pred.loc[:, 'Fold_{}_Prob_1'.format(fold)] = model.predict_proba(X_test)[:, 1]
-            
+        # Compute oob score
         oob += model.oob_score_ / N
         print('Fold {} OOB Score: {}\n'.format(fold, model.oob_score_))   
         
+        # Computing AUC score
+        df_roc = getROCCurveValues(model, X_train, y_train, trnIdx, valIdx, df_roc)
+        
+        # Get Prediction Probabilities
+        df_pred = getPredProb(model, fold, df_pred, X_test)
+        
+        # Feature Importance
+        df_featImp = getFeatImp(model, df_featImp, fold)
+        
     print('Average OOB Score: {}'.format(oob))
-    return df_pred
+    return df_pred, df_roc, df_featImp, oob
+
+# ROC Curve Values
+def getROCCurveValues(model, X_train, y_train, trnIdx, valIdx, df_roc):    
+    # Train
+    trnFpr, trnTpr, trnThresholds = roc_curve(y_train[trnIdx], model.predict_proba(X_train[trnIdx])[:, 1])
+    trnAucScore = auc(trnFpr, trnTpr)
     
+    # Validation
+    valFpr, valTpr, valThresholds = roc_curve(y_train[valIdx], model.predict_proba(X_train[valIdx])[:, 1])
+    valAucScore = auc(valFpr, valTpr)
+    
+    # Append Scores
+    df_rocTemp = pd.DataFrame({'fprs': [valFpr], 
+                               'tprs': [valTpr], 
+                               'trnAucScore': [trnAucScore], 
+                               'valAucScore': [valAucScore]})
+    df_roc = pd.concat([df_roc, df_rocTemp])
+    return df_roc
+
+# Get Prediction Probabilities
+def getPredProb(model, fold, df_pred, X_test):
+    # X_test probabilities
+    df_pred.loc[:, 'Fold_{}_Prob_0'.format(fold)] = model.predict_proba(X_test)[:, 0]
+    df_pred.loc[:, 'Fold_{}_Prob_1'.format(fold)] = model.predict_proba(X_test)[:, 1]
+    return df_pred
+
+# Feature Importance
+def getFeatImp(model, df_featImp, fold):
+    df_featImp.iloc[:, fold - 1] = model.feature_importances_
+    return df_featImp
+  
+#%% Plot Feature Importance
+
+def plotFeatImp(df_featImp):
+    df_featImp['Mean_Importance'] = df_featImp.mean(axis=1)
+    df_featImp.sort_values(by='Mean_Importance', inplace=True, ascending=False)
+    
+    plt.figure(figsize=(15, 20))
+    sns.barplot(x='Mean_Importance', y=df_featImp.index, data=df_featImp)
+    
+    plt.xlabel('')
+    plt.tick_params(axis='x', labelsize=15)
+    plt.tick_params(axis='y', labelsize=15)
+    plt.title('Random Forest Classifier Mean Feature Importance Between Folds', size=15)
+    
+    plt.show()
+    
+#%% Plot ROC Curve
+
+def plot_roc_curve(df_roc):
+    # Define fprs and tprs
+    fprs = list(df_roc['fprs'])
+    tprs = list(df_roc['tprs'])
+    
+    tprs_interp = []
+    aucs = []
+    mean_fpr = np.linspace(0, 1, 100)
+    f, ax = plt.subplots(figsize=(15, 15))
+    
+    # Plotting ROC for each fold and computing AUC scores
+    for i, (fpr, tpr) in enumerate(zip(fprs, tprs), 1):
+        tprs_interp.append(np.interp(mean_fpr, fpr, tpr))
+        tprs_interp[-1][0] = 0.0
+        roc_auc = auc(fpr, tpr)
+        aucs.append(roc_auc)
+        ax.plot(fpr, tpr, lw=1, alpha=0.3, label='ROC Fold {} (AUC = {:.3f})'.format(i, roc_auc))
+        
+    # Plotting ROC for random guessing
+    plt.plot([0, 1], [0, 1], linestyle='--', lw=2, color='r', alpha=0.8, label='Random Guessing')
+    
+    mean_tpr = np.mean(tprs_interp, axis=0)
+    mean_tpr[-1] = 1.0
+    mean_auc = auc(mean_fpr, mean_tpr)
+    std_auc = np.std(aucs)
+    
+    # Plotting the mean ROC
+    ax.plot(mean_fpr, mean_tpr, color='b', label='Mean ROC (AUC = {:.3f} $\pm$ {:.3f})'.format(mean_auc, std_auc), 
+            lw=2, alpha=0.8)
+    
+    # Plotting the standard deviation around the mean ROC Curve
+    std_tpr = np.std(tprs_interp, axis=0)
+    tprs_upper = np.minimum(mean_tpr + std_tpr, 1)
+    tprs_lower = np.maximum(mean_tpr - std_tpr, 0)
+    ax.fill_between(mean_fpr, tprs_lower, tprs_upper, color='grey', alpha=.2, label='$\pm$ 1 std. dev.')
+    
+    ax.set_xlabel('False Positive Rate', size=15, labelpad=20)
+    ax.set_ylabel('True Positive Rate', size=15, labelpad=20)
+    ax.tick_params(axis='x', labelsize=15)
+    ax.tick_params(axis='y', labelsize=15)
+    ax.set_xlim([-0.05, 1.05])
+    ax.set_ylim([-0.05, 1.05])
+
+    ax.set_title('ROC Curves of Folds', size=20, y=1.02)
+    ax.legend(loc='lower right', prop={'size': 13})
+    
+    plt.show()
+    
+#%% Make Prediction
+
+def makePrediction(model, df_pred, df, y_test, N):
+    # Class Survived are columns that end with Prob_1
+    class_survived = [col for col in df_pred.columns if col.endswith('Prob_1')]
+    
+    # Average Survived and not survived classes
+    df_pred['1'] = df_pred[class_survived].sum(axis=1) / N
+    df_pred['0'] = df_pred.drop(columns=class_survived).sum(axis=1) / N
+    
+    # Initiate prediction column
+    df_pred['pred'] = 0
+    
+    # Get indices of survived and set pred = 1 if survived
+    pos = df_pred[df_pred['1'] >= 0.5].index
+    df_pred.loc[pos, 'pred'] = 1
+    
+    # Predictions
+    y_pred = df_pred['pred'].astype(int)
+    
+    # Get test df
+    _, df_test = divide_df(df)
+    
+    # Create submissions df with PassengerId and Survived
+    df_submission = pd.DataFrame()
+    df_submission['PassengerId'] = df_test['PassengerId']
+    df_submission['Predicted'] = y_pred.values
+    df_submission['Actual'] = y_test
+    
+    # Count how many correct
+    df_submission['Correct'] = df_submission.apply(lambda row: 1 if row['Predicted'] == row['Actual'] else 0, axis=1)
+    
+    acc = df_submission['Correct'].sum() / df_submission['Correct'].count()
+    return df_submission, acc
+
 #%% Main
 
 if __name__ == '__main__':
@@ -480,9 +615,17 @@ if __name__ == '__main__':
     # Create Model
     model = createModel(SEED)
     
-    # Evaluate Baseline Model
-    oob = evaluateModel(model, X_train, y_train, X_test, y_test, N)
+    # Evaluate Model
+    df_pred, df_roc, df_featImp, oob = evaluateModel(model, df_train, X_train, y_train, X_test, N)
     
+    # Plot ROC Curve
+    plot_roc_curve(df_roc)
+    
+    # Plot Feature Importance
+    plotFeatImp(df_featImp)
+    
+    # Make Prediction
+    df_submission, acc = makePrediction(model, df_pred, df, y_test, N)
 
 
 
